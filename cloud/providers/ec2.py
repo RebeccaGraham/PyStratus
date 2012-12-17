@@ -293,18 +293,31 @@ class Ec2Cluster(Cluster):
     # create groups from config that may not exist
     self._create_custom_security_groups(security_groups)
 
-    reservation = self.ec2Connection.run_instances(image_id, min_count=number,
-      max_count=number, key_name=kwargs.get('key_name', None),
-      security_groups=security_groups, user_data=user_data,
-      instance_type=size_id, placement=kwargs.get('placement', None))
-    return [instance.id for instance in reservation.instances]
+    # These values should come from the config file 
+    price = 0.90
+    valid_from = None
+    valid_until = "2012-17-12T17:55:00-0600" #this value should be dynamic. End of current business day?
+    launch_group = "SpotTest"
+    availability_zone_group = None
+    reservation_type = "one-time" 
+
+    results = self.ec2Connection.request_spot_instances(price, image_id, number, 
+     reservation_type, valid_from, valid_until, launch_group, availability_zone_group, key_name=kwargs.get('key_name', None),
+     security_groups=security_groups, user_data=user_data, instance_type=size_id, placement=kwargs.get('placement', None),
+     kernel_id=kwargs.get('kernel_id', None),
+     ramdisk_id=kwargs.get('ramdisk_i', None),
+     monitoring_enabled=kwargs.get('monitoring_enabled', False),
+     subnet_id=kwargs.get('subnet_id', None))     
+
+    return [instance_request.id for instance_request in results]
 
   @timeout(600)
   def wait_for_instances(self, instance_ids, fail_on_terminated=True):
-    wait_time = 3
+    wait_time = 10
     while True:
+      print "waiting..."
       try:
-        if self._all_started(self.ec2Connection.get_all_instances(instance_ids), fail_on_terminated):
+        if self._all_started(self.ec2Connection.get_all_spot_instance_requests(instance_ids), fail_on_terminated):
           break
       # don't timeout for race condition where instance is not yet registered
       except EC2ResponseError, e:
@@ -312,20 +325,26 @@ class Ec2Cluster(Cluster):
       logging.info("Sleeping for %d seconds..." % wait_time)
       time.sleep(wait_time)
     
-  def _all_started(self, reservations, fail_on_terminated=True):
-    for res in reservations:
-      for instance in res.instances:
+  def _all_started(self, spot_instance_requests, fail_on_terminated=True):
+    for each in spot_instance_requests:
         # check for terminated
-        if fail_on_terminated and instance.state == "terminated":
-            raise InstanceTerminatedException(instance.state_reason['message'])
+        if fail_on_terminated and each.state == "terminated":
+            raise InstanceTerminatedException()
 
-        if instance.state != "running":
-          logging.info("Instance %s state = %s" % (instance, instance.state))
+        if each.state != "active":
+          logging.info("Instance %s state = %s" % (each, each.state))
           return False
 
-        if not ssh_available(env.user, env.key_filename, instance.public_dns_name):
+        # grab the id of the instance associated with the spot_instance_request 
+        ins_id = each.instance_id
+        # use the id to get the full instance information
+        results = self.ec2Connection.get_all_instances([ins_id])
+        for item in results:
+          # there should only ever be one item in results
+          ins = item.instances[0]
+        if not ssh_available(env.user, env.key_filename, ins.public_dns_name):
             logging.info("SSH unavailable...")
-            logging.info("User=%s; Host=%s; Key=%s" % (env.user, instance.public_dns_name, env.key_filename))
+            logging.info("User=%s; Host=%s; Key=%s" % (env.user, ins.public_dns_name, env.key_filename))
             return False
 
     return True
